@@ -1,11 +1,7 @@
 """
 Nucleo de analisis del Indice de Vulnerabilidad a Pretextos (PVI).
-
-Contiene:
-  - Normalizacion y limpieza de texto.
-  - Deteccion de relevancia (un resultado solo cuenta si menciona al objetivo).
-  - Taxonomia de senales con patrones multi-palabra correctos.
-  - Formula de puntuacion con saturacion y reportabilidad de confianza.
+Version unificada: Motor Auditor PVI + Capacidades de Social Eye (Secret Scanning,
+Kit de 5 Piezas de Pretexto, Enmascaramiento Ley 25.326 y Recalculo Dinamico).
 
 Modulo sin dependencias de Streamlit para poder testearse de forma aislada.
 """
@@ -18,8 +14,9 @@ import unicodedata
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Sequence
 
+
 # ---------------------------------------------------------------------------
-# 1. NORMALIZACION DE TEXTO
+# 1. NORMALIZACION DE TEXTO Y PROTECCION DE DATOS (LEY 25.326)
 # ---------------------------------------------------------------------------
 
 # Ruido de boilerplate comun en HTML (nav, cookies, traducciones, legal).
@@ -44,6 +41,111 @@ _EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
 _URL_RE = re.compile(r"https?://[^\s<>\"')\]]+")
 _PATH_RE = re.compile(r"(?<![\w])((?:/[\w.\-]+){1,6}/?)")
 _CAMEL_RE = re.compile(r"[A-Z][a-z]+(?:[A-Z][a-z]+)+")
+
+# --- Deteccion de secretos filtrados (integrado desde Social Eye) ---
+_SECRETOS_PATTERNS = [
+    ("webhook de Slack", re.compile(r"https://hooks\.slack\.com/services/[A-Za-z0-9/_+-]+")),
+    ("token de Slack", re.compile(r"xox[baprs]-[A-Za-z0-9-]{10,}")),
+    ("clave de acceso AWS", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
+    ("clave de Google API", re.compile(r"\bAIza[0-9A-Za-z_\-]{35}\b")),
+    ("token de GitHub", re.compile(r"\bghp_[A-Za-z0-9]{36}\b")),
+    ("clave privada", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
+    ("credencial expuesta", re.compile(
+        r"(?i)(?:api[_-]?key|secret|password|passwd|token)\s*[:=]\s*['\"]?[A-Za-z0-9_\-]{12,}"
+    )),
+]
+
+# --- Las 5 piezas del "Kit del Pretexto" (integrado desde Social Eye) ---
+PIEZAS_KIT: dict[str, str] = {
+    "identidad": "Entidad suplantable (proveedor, consultora, soporte, área interna, directivo)",
+    "contexto": "Motivo o excusa verosímil (proyecto, migración, auditoría, licitación, evento)",
+    "canal": "A quién contactar y por qué vía (correos, teléfonos, nombres con rol o autor)",
+    "jerga": "Tecnología, sistemas o rutas internas que dan credibilidad al pretexto",
+    "urgencia": "Palancas de presión o autoridad (cierre de trimestre, plazos, secretos críticos)",
+}
+
+_TERMINOS_URGENCIA = {
+    "urgente", "inmediato", "cuanto antes", "deadline", "vencimiento",
+    "cierre de trimestre", "cierre de mes", "fin de ano", "obligatorio",
+    "critico", "antes del", "plazo", "auditoria", "licitacion",
+}
+
+
+def detectar_secretos(texto: str) -> list[str]:
+    """Detecta credenciales, webhooks o tokens filtrados en el texto original."""
+    if not texto:
+        return []
+    hallados: list[str] = []
+    for nombre, pat in _SECRETOS_PATTERNS:
+        if pat.search(texto) and nombre not in hallados:
+            hallados.append(nombre)
+    return hallados
+
+
+def enmascarar_texto_sensible(texto: str) -> str:
+    """
+    Enmascara emails y posibles nombres de usuario (Ley 25.326 de Proteccion
+    de Datos Personales) cuando el analista activa el modo de privacidad.
+    """
+    if not texto:
+        return ""
+    # Enmascara la parte local de los correos: mgarcia@empresa.com -> m***@empresa.com
+    texto_masc = re.sub(
+        r"\b([a-zA-Z0-9])[a-zA-Z0-9._%+-]*(@[\w-]+\.[\w.-]+)",
+        r"\1***\2",
+        texto,
+    )
+    # Enmascara handles tipo @usuario
+    texto_masc = re.sub(r"(?<!\w)@[a-zA-Z0-9_]{3,}", "@***", texto_masc)
+    # Enmascara "Autor declarado en metadatos: Nombre"
+    texto_masc = re.sub(
+        r"(Autor declarado en metadatos:\s*)([A-Za-zÁÉÍÓÚáéíóúÑñ])[^\n.]+",
+        r"\1\2*** (protegido Ley 25.326)",
+        texto_masc,
+    )
+    return texto_masc
+
+
+def enmascarar_actor(actor: str) -> str:
+    """Enmascara el nombre propio de una persona (PER) conservando las organizaciones (ORG)."""
+    if "(PER)" in actor or "(PERSON)" in actor:
+        nombre = actor.split(" (")[0].strip()
+        etiqueta = actor[len(nombre):]
+        partes = nombre.split()
+        masc = " ".join(p[0] + "***" for p in partes if p)
+        return f"{masc}{etiqueta}"
+    if "@" in actor:
+        return re.sub(r"^([a-zA-Z0-9])[a-zA-Z0-9._%+-]*@", r"\1***@", actor)
+    return actor
+
+
+def mapear_piezas_kit(categorias: Iterable[str],
+                      terminos: Iterable[str],
+                      actores: Iterable[str],
+                      secretos: Iterable[str],
+                      texto_norm: str = "") -> list[str]:
+    """
+    Traduce las categorias y senales de un hallazgo a las 5 piezas del Kit
+    de Pretexto de Social Eye (identidad, contexto, canal, jerga, urgencia).
+    """
+    cats = set(categorias)
+    terms = {normalizar(t) for t in terminos}
+    acts = list(actores)
+    secs = list(secretos)
+    piezas: set[str] = set()
+
+    if "ROL_ALTO" in cats or acts or any(t in terms for t in ("proveedor", "consultora", "soporte", "rrhh")):
+        piezas.add("identidad")
+    if "PROCESO_ALTO" in cats:
+        piezas.add("contexto")
+    if "CONTACTO_DIRECTO" in cats or "METADATOS_DOC" in cats or any("(PER" in a or "@" in a for a in acts):
+        piezas.add("canal")
+    if "SOFTWARE" in cats or "CRITICO" in cats or secs:
+        piezas.add("jerga")
+    if secs or any(u in texto_norm for u in _TERMINOS_URGENCIA) or ("ROL_ALTO" in cats and "PROCESO_ALTO" in cats):
+        piezas.add("urgencia")
+
+    return [p for p in PIEZAS_KIT if p in piezas]
 
 
 def normalizar(texto: str) -> str:
@@ -74,7 +176,6 @@ def quitar_boilerplate(texto: str) -> str:
 def limpiar_texto_analizable(texto: str) -> str:
     """
     Pipeline completo de limpieza previo al NLP.
-
     Se conservan las RUTAS de las URLs (el path), porque en exposures
     tecnicas la ruta es la evidencia ("/wp-admin/", "/backup.sql"). Solo se
     elimina el esquema y el host, que no aportan senal de riesgo.
@@ -103,8 +204,6 @@ def similitud_jaccard(a: str, b: str) -> float:
     return len(ta & tb) / len(ta | tb)
 
 
-# Stopwords para el calculo de similitud tematica: al comparar dos textos
-# sobre "el mismo tema", estas palabras no aportan discriminacion.
 _STOP_SIMILITUD = {
     "el", "la", "los", "las", "un", "una", "unos", "unas", "de", "del", "al",
     "y", "o", "u", "e", "en", "con", "por", "para", "que", "se", "su", "sus",
@@ -123,16 +222,8 @@ def _tokens_contenido(texto: str) -> set[str]:
 
 
 def _entidades_clave(texto: str) -> set[str]:
-    """
-    Tokens especialmente discriminantes: nombres propios, proveedores, roles.
-
-    "migracion SAP con el proveedor Acme Consulting" vs "Example Corp anuncia
-    que el proyecto migracion SAP con Acme Consulting comenzo" comparten
-    {sap, acme, consulting, migracion}: las ENTIDADES son las que delatan
-    que hablan del mismo evento.
-    """
+    """Tokens especialmente discriminantes: nombres propios, proveedores, roles."""
     tokens = re.findall(r"[\w]+", normalizar(texto))
-    # Palabras genericas que aparecen en casi cualquier announcement.
     genericas = {
         "proyecto", "project", "equipo", "team", "company", "empresa", "announcement",
         "anuncia", "comenzo", "empieza", "empezar", "inicio", "nuevo", "nueva",
@@ -146,49 +237,26 @@ def _entidades_clave(texto: str) -> set[str]:
     }
 
 
-# Distintores que califican una entidad: "datacenter PRINCIPAL" y "datacenter
-# SECUNDARIO" son entornos distintos y habilitan pretextos distintos.
 _DISTINTORES = {
     "principal", "secundario", "terciario", "norte", "sur", "este", "oeste",
     "nuevo", "nueva", "viejo", "anterior", "alternativo", "respaldo", "backup",
     "primario", "central", "externo", "interno", "publico", "privado",
-    "prod", "staging", "desarrollo", "produccion", "produccion",
+    "prod", "staging", "desarrollo", "produccion",
     "alpha", "beta", "gamma", "uno", "dos", "tres",
 }
 
 
 def _hay_distintores_en_conflicto(a: str, b: str) -> bool:
-    """
-    True si los dos textos califican la misma entidad con DISTINTORES distintos.
-
-    "Migracion de servidores del datacenter principal completada" vs
-    "... del datacenter secundario completada" NO son el mismo hallazgo: cada
-    entorno es un vector de pretexto independiente.
-    """
+    """True si los dos textos califican la misma entidad con DISTINTORES distintos."""
     da = set(re.findall(r"[\w]+", normalizar(a))) & _DISTINTORES
     db = set(re.findall(r"[\w]+", normalizar(b))) & _DISTINTORES
     if not da or not db:
         return False
-    # Hay conflicto si los conjuntos de distintores son disjuntos y ambos
-    # tienen al menos uno: "principal" vs "secundario".
     return da.isdisjoint(db)
 
 
 def similitud_tematica(a: str, b: str) -> float:
-    """
-    Similitud tematica entre dos fragmentos (0..1).
-
-    A diferencia de Jaccard puro, ignora las stopwords, de modo que
-    "Feliz de empezar el proyecto migracion SAP con el proveedor Acme Consulting"
-    y "Example Corp anuncia que el proyecto migracion SAP con Acme Consulting
-    comenzo" se reconocen como el MISMO tema (no como dos hallazgos).
-
-    Combina tres medidas:
-      - jaccard    : solapamiento global de tokens con contenido.
-      - containment : cobertura del conjunto menor (cita corta dentro de larga).
-      - entidades   : solapamiento de nombres propios/proveedores (la senal mas
-                      fuerte de "es el mismo evento", p.ej. "Acme Consulting").
-    """
+    """Similitud tematica entre dos fragmentos (0..1)."""
     ta = _tokens_contenido(a)
     tb = _tokens_contenido(b)
     if not ta or not tb:
@@ -196,7 +264,6 @@ def similitud_tematica(a: str, b: str) -> float:
     inter = ta & tb
     if not inter:
         return 0.0
-
     jaccard = len(inter) / len(ta | tb)
     containment = len(inter) / min(len(ta), len(tb))
 
@@ -205,18 +272,11 @@ def similitud_tematica(a: str, b: str) -> float:
     if ea and eb:
         e_inter = ea & eb
         sim_ent = len(e_inter) / min(len(ea), len(eb))
-        # ENTIDADES EN CONFLICTO: si ambos textos mencionan la misma entidad
-        # pero con un DISTINTOR (principal vs secundario, norte vs sur,
-        # empresa A vs empresa B), NO son el mismo hallazgo: un atacante puede
-        # usar cada uno para un pretexto distinto.
-        conflicto = _hay_distintores_en_conflicto(a, b)
-        if conflicto:
+        if _hay_distintores_en_conflicto(a, b):
             sim_ent *= 0.25
     else:
         sim_ent = 0.0
 
-    # Las entidades compartidas son la senal mas fuerte de "mismo evento",
-    # pero no deben anular una diferencia tematica real.
     return round(min(1.0, 0.3 * jaccard + 0.3 * containment + 0.4 * sim_ent), 4)
 
 
@@ -229,7 +289,6 @@ def es_duplicado_tematico(a: str, b: str, umbral: float = 0.55) -> bool:
 # 2. RELEVANCIA: UN RESULTADO SOLO CUENTA SI HABLA DEL OBJETIVO
 # ---------------------------------------------------------------------------
 
-# Palabras genericas que no sirven como identificador de la organizacion.
 _STOP_EMPRESA = {
     "sa", "sas", "srl", "sra", "spa", "ltda", "limitada", "grupo", "empresa",
     "corporacion", "corporation", "corp", "company", "co", "inc", "llc",
@@ -260,12 +319,7 @@ def _variantes_empresa(empresa: str) -> list[str]:
 
 def evaluar_relevancia(texto: str, empresa: str, dominio: str,
                        url: str = "") -> tuple[bool, float, str]:
-    """
-    Determina si un fragmento es atribuible a la organizacion auditada.
-
-    Returns:
-        (es_relevante, confianza 0..1, motivo)
-    """
+    """Determina si un fragmento es atribuible a la organizacion auditada."""
     if not texto or not texto.strip():
         return False, 0.0, "texto_vacio"
 
@@ -278,7 +332,6 @@ def evaluar_relevancia(texto: str, empresa: str, dominio: str,
 
     coincide_empresa = any(v in texto_norm or v in url_norm for v in variantes)
 
-    # Coincidencia parcial: al menos un token identificador distintivo.
     tokens = tokens_identificadores(empresa)
     tokens_texto = set(re.findall(r"[\w]+", texto_norm))
     tokens_url = set(re.findall(r"[\w]+", url_norm))
@@ -308,7 +361,7 @@ def extraer_identificadores_directos(texto: str, dominio: str) -> list[str]:
             encontrados.append(m.group(0))
     return list(dict.fromkeys(encontrados))
 
-# Extractor pasivo de stack desde fuentes tecnicas antes de descartarlas
+
 _MAPA_INFRA_SOCIAL = {
     "outlook.com": "Microsoft 365 / Outlook",
     "protection.outlook.com": "Microsoft 365 / Outlook",
@@ -324,6 +377,7 @@ _MAPA_INFRA_SOCIAL = {
     "fortinet": "Fortinet",
     "wp-admin": "WordPress",
 }
+
 
 def extraer_stack_tecnico_verificado(documentos: list[dict[str, Any]]) -> set[str]:
     """Extrae herramientas confirmadas por fuentes tecnicas (DNS, Certs, Robots) para enriquecer pretextos."""
@@ -342,11 +396,11 @@ def extraer_stack_tecnico_verificado(documentos: list[dict[str, Any]]) -> set[st
                     stack.add(herramienta)
     return stack
 
+
 def calcular_anclaje_tecnico(documentos: list[dict[str, Any]]) -> dict[str, float]:
     """
     Calcula el aporte de las fuentes tecnicas (Robots, Subdominios, Wayback, DNS)
     como 'Anclaje de Credibilidad Tecnica' para un pretexto social.
-    Devuelve {fuente: puntos_brutos_acotados}.
     """
     aportes: dict[str, float] = {}
     marcadores_criticos = {
@@ -367,28 +421,15 @@ def calcular_anclaje_tecnico(documentos: list[dict[str, Any]]) -> dict[str, floa
         texto = normalizar(doc.get("texto", ""))
         hits = sum(1 for m in marcadores_criticos if m in texto)
         if hits > 0:
-            # Sube de forma progresiva hasta el tope de esa fuente tecnica
             tope = topes_por_fuente[fuente]
             pts = min(tope, tope * (1.0 - math.exp(-hits / 2.5)))
             aportes[fuente] = round(max(aportes.get(fuente, 0.0), pts), 2)
     return aportes
 
+
 # ---------------------------------------------------------------------------
 # 3. TAXONOMIA DE SENALES
 # ---------------------------------------------------------------------------
-
-# Cada categoria define:
-#   - peso: contribucion intrinseca al riesgo (independiente de la fuente).
-#   - frases: terminos multi-palabra (se tokenizan correctamente).
-#   - unicos: terminos de una sola palabra que SI tienen senal por si mismos.
-#   - contexto: terminos que solo cuentan si aparecen junto a un contexto de
-#     exposicion tecnica (evita que "test" o "admin" en prosa generica count).
-#   - requiere_contexto: si True, el termino solo puntua con contexto tecnico.
-#   - social: si True, la categoria describe CONTEXTO SOCIAL (personas,
-#     relaciones, proyectos). Es la dimension central del PVI: lo que permite
-#     construir un pretexto creible ("llamar haciendose pasar por el proveedor
-#     del proyecto X"). Las categorias no sociales (exposicion tecnica pura)
-#     NO habilitan por si solas un hallazgo de pretexting.
 
 CATEGORIAS: dict[str, dict[str, Any]] = {
     "CRITICO": {
@@ -504,15 +545,9 @@ CATEGORIAS: dict[str, dict[str, Any]] = {
     },
 }
 
-# Multiplicadores por categoria (usados para el puntaje intrinseco).
 MULTIPLICADORES = {nombre: cfg["peso"] for nombre, cfg in CATEGORIAS.items()}
-
-# Etiquetas NER del pipeline statistical de es_core_news_md que se consideran
-# "actores" para el bonus de co-ocurrencia.
 ETIQUETAS_ACTOR = {"PER", "ORG", "PERSON"}
 
-# Generadores de software que NO deben generar riesgo por si mismos
-# (aparecen en el /Producer de cualquier PDF generado por esa herramienta).
 _PRODUCTORES_GENERICOS = {
     "adobe", "acrobat", "microsoft", "word", "excel", "powerpoint", "openoffice",
     "libreoffice", "pages", "pdftk", "itext", "wkhtmltopdf", "chromium",
@@ -521,13 +556,7 @@ _PRODUCTORES_GENERICOS = {
 
 
 def frase_a_patrones(frases: Iterable[str]) -> list[dict[str, Any]]:
-    """
-    Convierte frases en patrones de EntityRuler token por token.
-
-    Esto CORRIGE el bug del codigo original: un patron con
-    {"LOWER": {"IN": ["office 365"]}} nunca puede coincidir porque
-    "office 365" son dos tokens. Aqui se genera [{"LOWER":"office"},{"LOWER":"365"}].
-    """
+    """Convierte frases en patrones de EntityRuler token por token."""
     patrones = []
     for frase in frases:
         tokens = frase.lower().split()
@@ -564,7 +593,6 @@ def construir_patrones_ruler() -> list[dict[str, Any]]:
 # 4. DETECCION DE SENALES POR CATEGORIA (con control de contexto)
 # ---------------------------------------------------------------------------
 
-
 def _contiene_frase(texto_norm: str, frase: str) -> bool:
     """Busca la frase respetando limites de palabra."""
     patron = r"(?<!\w)" + r"\s+".join(re.escape(t) for t in frase.split()) + r"(?!\w)"
@@ -586,18 +614,14 @@ def detectar_categorias(texto: str, contexto_tecnico: bool = False,
                         excluir: set[str] | None = None,
                         doc_nlp: Any = None,
                         dominio: str = "") -> dict[str, list[str]]:
-    """
-    Detecta que categorias de riesgo aparecen en un fragmento.
-    Combina las entidades detectadas por el EntityRuler de spaCy (si doc_nlp
-    esta disponible) con coincidencia tolerante a plurales en espanol (s/es).
-    """
+    """Detecta que categorias de riesgo aparecen en un fragmento."""
     texto_norm = normalizar(texto)
     if not texto_norm:
         return {}
+
     excluidos = {normalizar(t) for t in (excluir or set())}
     detectadas: dict[str, list[str]] = {}
 
-    # 1) Aprovecha las entidades ya etiquetadas por el EntityRuler de spaCy (incluye lemas)
     if doc_nlp is not None:
         for ent in getattr(doc_nlp, "ents", []):
             cat = ent.label_
@@ -612,7 +636,6 @@ def detectar_categorias(texto: str, contexto_tecnico: bool = False,
                 continue
             detectadas.setdefault(cat, []).append(ent_norm)
 
-    # 2) Respaldo determinista con soporte morfologico de plurales (s / es)
     for categoria, cfg in CATEGORIAS.items():
         terminos: list[str] = list(detectadas.get(categoria, []))
         for frase in cfg["frases"]:
@@ -630,15 +653,11 @@ def detectar_categorias(texto: str, contexto_tecnico: bool = False,
         for termino in unicos_validos:
             if normalizar(termino) in excluidos:
                 continue
-            # Acepta singular o plural regular en espanol (ej. proveedor/proveedores, gerente/gerentes)
             patron_plural = r"(?<!\w)" + re.escape(termino) + r"(?:es|s)?(?!\w)"
             if re.search(patron_plural, texto_norm):
                 terminos.append(termino)
 
         if categoria == "CONTACTO_DIRECTO":
-            # Exige que el email pertenezca al dominio auditado (si se conoce el dominio)
-            # o que exista un telefono real, evitando que un @gmail.com de un tercero
-            # dispare una alerta de CONTACTO_DIRECTO corporativo.
             emails_en_texto = _EMAIL_RE.findall(texto or "")
             if emails_en_texto and dominio:
                 dom_low = dominio.lower()
@@ -654,22 +673,16 @@ def detectar_categorias(texto: str, contexto_tecnico: bool = False,
 
         if terminos:
             detectadas[categoria] = sorted(set(terminos))
+
     return detectadas
 
 
 def es_productor_generico(texto: str) -> bool:
-    """
-    True si el texto solo describe un generador de PDF sin valor de riesgo.
-
-    Se ignoran tokens numericos (versiones) y marcas registradas, de modo que
-    "Adobe Acrobat 24.1" se reconoce como generico pero "SAP Crystal Reports"
-    no lo es.
-    """
+    """True si el texto solo describe un generador de PDF sin valor de riesgo."""
     tokens = [t for t in re.findall(r"[\w]+", normalizar(texto))
               if not t.isdigit()]
     if not tokens:
         return True
-    # Todos los tokens deben ser marcadores conocidos (o ruido no alfabetico).
     return all(t in _PRODUCTORES_GENERICOS for t in tokens)
 
 
@@ -677,9 +690,6 @@ def es_productor_generico(texto: str) -> bool:
 # 3b. FILTRO DE RUIDO Y DE ENUMERACION TECNICA PURA
 # ---------------------------------------------------------------------------
 
-# Marcas de software/producto que por si solas no aportan contexto social.
-# "Microsoft Word 16.0" es boilerplate, no una exposicion de stack util para
-# montar un pretexto.
 _MARCAS_GENERICAS = {
     "microsoft", "word", "excel", "powerpoint", "outlook", "teams", "onenote",
     "adobe", "acrobat", "photoshop", "illustrator", "chrome", "chromium",
@@ -692,9 +702,6 @@ _MARCAS_GENERICAS = {
     "javascript", "soportado", "traducido", "google", "translate",
 }
 
-# Tokens que delatan una ENUMERACION TECNICA (lista de hosts, rutas, registros)
-# y no un relato social. Si el fragmento es casi solo eso, no habilita un
-# hallazgo de pretexting: es informacion de reconocimiento, no de contexto social.
 _TECNICO_PURO = {
     "subdominio", "subdominios", "registro", "registros", "txt", "mx", "cname",
     "ns", "soa", "dns", "resuelven", "apunta", "apuntan", "servidor", "servidores",
@@ -703,24 +710,18 @@ _TECNICO_PURO = {
     "urls", "indice", "http", "https", "host", "dominio", "endpoints",
 }
 
-# Actores que NO son una persona/entidad real: son sustantivos genericos que
-# el NER etiqueta como MISC y que inflan el bonus de actor.
 _ACTORES_GENERICOS = {
     "el equipo", "la empresa", "la organizacion", "el equipo de trabajo",
     "nuestro equipo", "el proyecto", "la proyecto", "el cliente", "el sector",
-    "el mercado", "el mundo", "la industria", "la empresa", "todos",
-    "nosotros", "ellos", "ustedes", "la industria", "nuestra empresa",
-    "el mercado", "el sector", "el mundo", "la sociedad", "el gobierno",
+    "el mercado", "el mundo", "la industria", "todos",
+    "nosotros", "ellos", "ustedes", "nuestra empresa",
+    "la sociedad", "el gobierno",
     "la institucion", "el sistema", "la plataforma", "el portal", "la aplicacion",
-    "el servicio", "la empresa", "nuestro proyecto", "el area", "el equipo tecnico",
+    "el servicio", "nuestro proyecto", "el area", "el equipo tecnico",
     "texto", "documento", "contenido", "pagina", "archivo", "noticia", "blog",
     "articulo", "post", "mensaje", "titulo", "encabezado", "resumen",
 }
 
-# Marcadores de CODIGO FUENTE pegado (pastebin, snippets, repositorios).
-# "define('USE_USERNAME', true)" es codigo de una aplicacion: la palabra
-# "password" aparece como nombre de variable, no como exposicion de la
-# organizacion auditada.
 _MARCAS_CODIGO = {
     "define", "function", "return", "var ", "let ", "const ", "class ",
     "import ", "from ", "print", "echo", "console.log", "printf", "if (",
@@ -730,9 +731,6 @@ _MARCAS_CODIGO = {
     "self.", "null;", "endif", "endforeach", "namespace", "use ", "new ",
 }
 
-
-# Autores genericos o no identificables en metadatos de PDF: no son una
-# persona, por lo que NO constituyen una diana de phishing dirigido.
 _AUTORES_GENERICOS = {
     "microsoft office user", "user", "unknown", "desconocido", "admin",
     "administrator", "owner", "creator", "author", "default", "none",
@@ -750,65 +748,43 @@ def autor_es_generico(autor: str) -> bool:
         return True
     if a in _AUTORES_GENERICOS:
         return True
-    # "Microsoft Office User", "Windows User", "PDF Creator" -> generico.
     if a.endswith(" user") or a.endswith(" usuario"):
         return True
     if "office" in a or a.startswith("pdf"):
         return True
-    # Un autor generico suele ser una sola palabra corta o un placeholder.
     if len(a) < 3:
         return True
     return False
 
 
-# Fragmentos esquematicos de navegacion: "Login | Salesforce", "See Troubleshoot
-# Login Issues", "Contacto". Contienen un termino de la taxonomia pero no
-# describen ninguna situacion, por lo que no habilitan ningun pretexto.
 _SCHEMATICOS = {
     "login", "logout", "signup", "signin", "register", "home", "menu",
     "contact", "about", "search", "more", "next", "previous", "back",
     "cookie", "cookies", "privacy", "terms", "help", "support", "faq",
     "sitemap", "troubleshoot", "issues", "issue", "settings", "profile",
-    "account", "dashboard", "overview", "overview", "read more", "learn more",
+    "account", "dashboard", "overview", "read more", "learn more",
 }
 
 
 def _es_nombre_propio(texto: str, token: str) -> bool:
-    """
-    True si el token aparece en el texto con inicial mayuscula y no al
-    principio de una oracion.
-
-    "Login | Salesforce" -> 'salesforce' es la entidad nombrada, no una
-    situacion. "Migramos a Acme Consulting" -> 'acme' y 'consulting' son
-    entidad y contexto respectivamente: el fragmento si es relevante.
-    """
     for m in re.finditer(re.escape(token), texto, re.IGNORECASE):
         inicio = m.start()
         if inicio == 0:
-            # Al principio de la frase: capitalizacion normal, no prueba.
             continue
         anterior = texto[inicio - 1]
         if not (anterior.isalpha() or anterior.isdigit()):
-            # Comienzo de palabra tras un separador.
             return texto[m.start()].isupper()
     return False
 
 
 def es_fragmento_esquematico(texto: str) -> bool:
-    """
-    True si el fragmento es un etiqueta de navegacion, no una frase con contenido.
-
-    "Login | Salesforce" y "See Troubleshoot Login Issues" matchean 'login'
-    (categoria CONTACTO_DIRECTO) pero no describen nada que un atacante pueda
-    usar: no hay actor, proceso ni relacion.
-    """
+    """True si el fragmento es una etiqueta de navegacion, no una frase con contenido."""
     norm = normalizar(texto)
     if not norm:
         return True
     tokens = re.findall(r"[\w]+", norm)
     if not tokens:
         return True
-    # Palabras que aportan contenido social minimo.
     verbos_contenido = {
         "comenzo", "empezamos", "inicio", "anuncio", "movemos", "contratamos",
         "publico", "participa", "junto", "equipo", "proyecto", "proveedor",
@@ -816,27 +792,21 @@ def es_fragmento_esquematico(texto: str) -> bool:
         "facturacion", "nominas", "nomina", "continuidad", "evaluacion",
         "onboarding", "capacitacion", "reunion", "entrega", "lanzamos",
         "celebramos", "feliz", "nuevo", "nueva", "acuerdo", "alianza", "compra",
-        "proveedores", "proveedor", "consultora", "consultoria", "trabajo",
-        "alianza", "socio", "director", "gerente", "responsable", "coordinador",
+        "proveedores", "consultora", "consultoria", "trabajo",
+        "socio", "director", "gerente", "responsable", "coordinador",
         "jefe", "analista", "soporte", "finanzas", "rrhh", "recursos",
         "amazon", "google", "microsoft", "sap", "aws", "oracle", "adobe",
         "estrenamos", "incorporamos", "asociamos", "respaldamos", "garantizamos",
     }
     if any(t in verbos_contenido for t in tokens):
         return False
-    # Si todas las palabras son etiquetas de navegacion, es esquematico.
     if all(t in _SCHEMATICOS for t in tokens):
         return True
-    # Pocas palabras y todas muy cortas: "Login | Salesforce", "Sign up now".
     if len(tokens) <= 6 and all(len(t) <= 4 for t in tokens):
         return True
-    # "See Troubleshoot Login Issues" -> todo el contenido son etiquetas.
     sustantivos = [t for t in tokens if t not in _SCHEMATICOS and len(t) > 4]
     if not sustantivos:
         return True
-    # "Login | Salesforce": la unica palabra con contenido es un NOMBRE PROPIO
-    # (la entidad nombrada), no una situacion descrita. Un fragmento hecho
-    # solo de etiquetas + nombres propios no habilita ningun pretexto.
     if len(tokens) <= 4:
         if all(t in _SCHEMATICOS or _es_nombre_propio(texto, t) for t in tokens):
             return True
@@ -844,39 +814,23 @@ def es_fragmento_esquematico(texto: str) -> bool:
 
 
 def es_codigo_fuente(texto: str) -> bool:
-    """
-    True si el fragmento es CODIGO FUENTE pegado, no un relato en lenguaje natural.
-
-    "define('USE_USERNAME', true); // User will be redirected..." es codigo de
-    una aplicacion: contiene 'password' como nombre de variable, lo que no
-    revela nada de la organizacion auditada.
-    """
+    """True si el fragmento es CODIGO FUENTE pegado, no un relato en lenguaje natural."""
     norm = normalizar(texto)
     if not norm:
         return False
     marcas = sum(1 for m in _MARCAS_CODIGO if m in norm)
-    # Se exige que el codigo sea PREDOMINANTE para no descartar prosa que
-    # mencione "return" o "new" de pasada, ni un documento tecnico que
-    # incluya fragmentos de codigo de ejemplo entre parrafos.
     if marcas >= 2:
-        # Proporcion de marcadores sobre el total de tokens del fragmento.
         tokens = re.findall(r"[\w]+", norm)
         if tokens:
             proporcion = marcas / len(tokens)
-            # Un paste es corto y denso en codigo; un documento tecnico es
-            # largo y su codigo es intercalado.
             if proporcion >= 0.30:
                 return True
             if len(norm) < 400 and proporcion >= 0.15:
                 return True
-    # Sintaxis inequivoca: paréntesis de llamada o punto y coma multiple.
-    # Se exige ademas que el fragmento sea CORTO: un manual tecnico con
-    # parrafos y codigo intercalado no es un paste.
     if len(norm) < 400:
         if re.search(r"[;{}]\s*\S", norm) and re.search(r"[(){}]\s*\w+\s*[=,)]", norm):
             if len(re.findall(r"[;(){}]", norm)) >= 4:
                 return True
-        # Asignacion con llamada a funcion: "define('X', true);" o "foo(a, b)".
         if re.search(r"\w+\s*\(\s*['\"]?\w+['\"]?\s*,", norm):
             if len(re.findall(r"[;()]", norm)) >= 4:
                 return True
@@ -884,11 +838,7 @@ def es_codigo_fuente(texto: str) -> bool:
 
 
 def es_ruido_generico(texto: str) -> bool:
-    """
-    True si el fragmento esta compuesto solo de marcas/productoras sin valor.
-
-    Ej.: "Microsoft Word 16.0. Word Microsoft Office 365 Microsoft Excel 16.0."
-    """
+    """True si el fragmento esta compuesto solo de marcas/productoras sin valor."""
     tokens = [t for t in re.findall(r"[\w]+", normalizar(texto))
               if not t.isdigit() and len(t) > 1]
     if not tokens:
@@ -896,66 +846,37 @@ def es_ruido_generico(texto: str) -> bool:
     relevantes = [t for t in tokens if t not in _MARCAS_GENERICAS]
     if not relevantes:
         return True
-    # Si las marcas dominan (>60%) y no hay senal social, es boilerplate.
     if len(tokens) >= 4 and (len(relevantes) / len(tokens)) < 0.4:
         return True
     return False
 
 
 def es_enumeracion_tecnica_pura(texto: str) -> bool:
-    """
-    True si el fragmento es una lista de recursos tecnicos, no un relato social.
-
-    "Subdominios certificados del dominio: admin.example.com, vpn.example.com"
-    es informacion de reconocimiento: util para un atacante TECNICO, pero NO
-    habilita un pretexto social.
-
-    Tambien cubre el caso en que la enumeracion contiene palabras que
-    matchean categorias sociales: "Registros DNS publicos del dominio: ...
-    CNAME: proveedor.ejemplo.com" mentions "proveedor", pero sigue siendo una
-    lista de recursos, NO un relato de un proyecto con un proveedor.
-    """
+    """True si el fragmento es una lista de recursos tecnicos, no un relato social."""
     norm = normalizar(texto)
     tokens = [t for t in re.findall(r"[\w]+", norm) if len(t) > 1]
     if not tokens:
         return False
-
-    # --- Senales ESTRUCTURALES (se evaluan antes del ratio de tokens) ---
-    # Linea de robots.txt / sitemap: "Disallow: /ruta" es una instruccion
-    # para rastreadores, no un relato sobre la organizacion.
     if re.match(r"^(disallow|allow|sitemap)\s*:", norm):
         return True
-    # Cualquier linea que contenga una directiva de rastreadores.
     if re.search(r"\b(disallow|allow)\s*:\s*/", norm):
         return True
-    # Estructura de lista tecnica: "TXT: x | MX: y | CNAME: z".
     if re.search(r"(\b(txt|mx|cname|ns|soa|a|aaaa)\b\s*\)?\s*:|^servidor\s+de\s+correo)", norm):
         return True
-
     n_tec = sum(1 for t in tokens if t in _TECNICO_PURO)
-    # Dominio de tokens tecnicos en el fragmento.
     ratio = n_tec / len(tokens)
     if ratio < 0.20:
         return False
-    # Si ademas hay hostnames o rutas (mas de un '.' o '/'), es enumeracion.
     n_hosts = len(re.findall(r"[\w-]+\.[a-z]{2,}", norm))
     n_rutas = len(re.findall(r"/[\w.-]+", norm))
     if n_hosts >= 2 or n_rutas >= 2:
         return True
-    # Un unico path tecnico suelta: "/login-messages/" o "/admin/backup.sql".
     if n_rutas >= 1 and ratio >= 0.30:
         return True
     return ratio >= 0.4
 
 
 def _coincide_con_nombre_documento(actor: str, texto: str) -> bool:
-    """
-    True si el "actor" detectado es en realidad el NOMBRE del documento.
-
-    El NER etiqueta "Formulario Proveedores" como MISC y lo devuelve como
-    primera entidad, desplazando al actor real (el proveedor, el responsable
-    del area). El nombre del documento es una etiqueta, no un actor.
-    """
     nombre = normalizar(actor.split(" (")[0])
     if not nombre:
         return False
@@ -965,8 +886,6 @@ def _coincide_con_nombre_documento(actor: str, texto: str) -> bool:
     nombre_doc = normalizar(m.group(1))
     if not nombre_doc:
         return False
-    # Coincidencia exacta o el actor es el nombre del documento con palabras
-    # adicionales del NER ("Formulario Proveedores (MISC)").
     if nombre == nombre_doc:
         return True
     tokens_doc = set(nombre_doc.split())
@@ -981,7 +900,6 @@ def actor_es_generico(actor: str) -> bool:
     texto = normalizar(actor.split(" (")[0])
     if texto in _ACTORES_GENERICOS:
         return True
-    # "El equipo (MISC)" -> "el equipo". "Example Corp (ORG)" -> "example corp".
     if len(texto.split()) == 1 and texto in {"equipo", "proyecto", "empresa",
                                             "organizacion", "cliente", "area"}:
         return True
@@ -989,13 +907,7 @@ def actor_es_generico(actor: str) -> bool:
 
 
 def tiene_senal_social(categorias: dict[str, list[str]]) -> bool:
-    """
-    True si alguna categoria detectada describe CONTEXTO SOCIAL.
-
-    Una categoria tecnica pura (CRITICO) NO habilita por si sola un hallazgo
-    de pretexting: el PVI mide cuantas veces el atacante puede leverages la
-    informacion social de la organizacion para inventar una mentira.
-    """
+    """True si alguna categoria detectada describe CONTEXTO SOCIAL."""
     return any(CATEGORIAS.get(c, {}).get("social", False) for c in categorias)
 
 
@@ -1011,10 +923,7 @@ def obtener_nlp():
     global _MODELO_NLP
     if _MODELO_NLP is not None:
         return _MODELO_NLP
-
     import spacy
-    from spacy.pipeline import EntityRuler
-
     nlp = spacy.load("es_core_news_md")
     if "pvi_ruler" not in nlp.pipe_names:
         ruler = nlp.add_pipe("entity_ruler", name="pvi_ruler", before="ner")
@@ -1022,10 +931,10 @@ def obtener_nlp():
     _MODELO_NLP = nlp
     return nlp
 
+
 # ---------------------------------------------------------------------------
-# 6. FORMULA PVI REDISEÑADA
+# 6. FORMULA PVI Y ESTRUCTURAS DE DATOS
 # ---------------------------------------------------------------------------
-#
 
 PESOS_FUENTE: dict[str, dict[str, Any]] = {
     "Metadatos PDF":               {"peso": 6.5, "confianza": 0.85, "categoria": "Documentos"},
@@ -1041,17 +950,9 @@ PESOS_FUENTE: dict[str, dict[str, Any]] = {
 
 PESO_FUENTE_POR_DEFECTO = {"peso": 3.0, "confianza": 0.60, "categoria": "Desconocida"}
 
-# Constante de saturacion: a raw=30 -> PVI~49; a raw=60 -> PVI~74;
-# a raw=120 -> PVI~93. Calibrada para que el dataset de demostracion (con
-# exposures criticas deliberadas) quede en rango ALTO y un caso con solo
-# senales medias quede claramente por debajo.
 K_SATURACION = 26.0
-
-# Bonus maximo por co-ocurrencia con un actor (PER/ORG).
 BONUS_ACTOR_MAX = 0.25
-# Bonus por identificador directo (email/URL del dominio).
 BONUS_IDENTIFICADOR = 0.20
-# Bonus por confirmacion del hallazgo en mas de una fuente.
 BONUS_CORROBORACION = 0.15
 
 
@@ -1073,6 +974,8 @@ class Hallazgo:
     mitigacion: str = ""
     pretexto: str = ""                # accion concreta viable para el atacante
     confirmaciones: int = 1
+    secretos: list[str] = field(default_factory=list)   # Integrado Social Eye
+    piezas_kit: list[str] = field(default_factory=list) # Integrado Social Eye
 
 
 @dataclass
@@ -1088,7 +991,9 @@ class ResultadoAnalisis:
     fuentes_ok: list[str] = field(default_factory=list)
     fuentes_fallidas: list[dict[str, str]] = field(default_factory=list)
     stack_verificado: list[str] = field(default_factory=list)
-    reconocimiento_tecnico: list[dict[str, str]] = field(default_factory=list) # <-- NUEVO
+    reconocimiento_tecnico: list[dict[str, str]] = field(default_factory=list)
+    piezas_cubiertas: list[str] = field(default_factory=list) # Integrado Social Eye
+    aportes_tecnicos: dict[str, float] = field(default_factory=dict)
 
     @property
     def estado(self) -> str:
@@ -1111,18 +1016,21 @@ def _factor_frescura_temporal(texto: str) -> float:
         return 0.80
     return 1.0
 
+
 def calcular_riesgo_intrinseco(categorias: dict[str, list[str]],
                                 contexto_tecnico: bool,
                                 tiene_actor: bool,
                                 identificadores: list[str],
-                                texto: str = "") -> float:
+                                texto: str = "",
+                                tiene_secreto: bool = False) -> float:
     """
     Riesgo intrinseco del hallazgo (0..1), INDEPENDIENTE de la fuente.
-    Incluye sinergia por Triada de Pretexto (Quien + Con que + Proceso)
-    y ajuste por frescura temporal.
+    Incluye sinergia por Triada de Pretexto, Secret Scanning y frescura temporal.
     """
-    if not categorias:
+    if not categorias and not tiene_secreto:
         return 0.0
+    if tiene_secreto:
+        return 0.99
     pesos = sorted((MULTIPLICADORES.get(c, 0.3) for c in categorias), reverse=True)
     acumulado = 1.0
     for w in pesos:
@@ -1137,7 +1045,6 @@ def calcular_riesgo_intrinseco(categorias: dict[str, list[str]],
     if contexto_tecnico:
         bonus += 0.10
 
-    # Sinergia de la Triada de Pretexto: Persona/Rol + Software + Proceso activo
     cats_set = set(categorias.keys())
     tiene_diana = tiene_actor or bool(cats_set & {"ROL_ALTO", "CONTACTO_DIRECTO", "METADATOS_DOC"})
     tiene_proceso = "PROCESO_ALTO" in cats_set
@@ -1148,6 +1055,7 @@ def calcular_riesgo_intrinseco(categorias: dict[str, list[str]],
     riesgo_combinado = base + bonus * (1.0 - base)
     riesgo_ajustado = riesgo_combinado * _factor_frescura_temporal(texto)
     return round(min(0.99, riesgo_ajustado), 4)
+
 
 def clasificar_severidad(riesgo: float) -> str:
     """Severidad en base al riesgo intrinseco (no al impacto ponderado)."""
@@ -1171,7 +1079,7 @@ _DIAGNOSTICOS: list[tuple[tuple[str, ...], str, str]] = [
     (
         ("CRITICO",),
         "Exposicion de rutas administrativas, endpoints o parametros de configuracion "
-        "que facilitate el reconocimiento tecnico previo a un pretexto de soporte.",
+        "que facilita el reconocimiento tecnico previo a un pretexto de soporte.",
         "Restringir el acceso con autenticacion robusta y MFA, rotar secretos "
         "expuestos y eliminar rutas sensibles de robots.txt y del indice del sitio.",
     ),
@@ -1213,28 +1121,22 @@ _DIAGNOSTICOS: list[tuple[tuple[str, ...], str, str]] = [
     (
         ("METADATOS_DOC",),
         "Los metadatos de un documento publico identifican a la persona que lo "
-        "elaboro y el tipo de documento, permettant un phishing dirigido a esa "
+        "elaboro y el tipo de documento, permitiendo un phishing dirigido a esa "
         "persona simulando un aviso urgente relacionado con el documento.",
         "Eliminar los metadatos de autor de los documentos publicados, revisar "
-        "que los archivos internos no se expongan al indice de busquadores y "
+        "que los archivos internos no se expongan al indice de buscadores y "
         "sensibilizar a los autores sobre el riesgo.",
     ),
     (
         ("SOFTWARE",),
-        "Se revela el stack tecnologico corporativa, util para reconocer "
-        "vulnerabilidades conocidas y fabricate incidentes de seguridad.",
+        "Se revela el stack tecnologico corporativo, util para reconocer "
+        "vulnerabilidades conocidas y fabricar incidentes de seguridad.",
         "Reducir la exposicion de detalle tecnico en canales abiertos y en "
         "metadatos de documentos publicados.",
     ),
 ]
 
 
-# ---------------------------------------------------------------------------
-# 7b. GENERACION DEL PRETEXTO VIABLE (salida central del reporte)
-# ---------------------------------------------------------------------------
-
-# Plantillas de pretexto por combinacion de categorias. El objetivo es
-# responder la pregunta operativa: "que puede HACER el atacante con esto?".
 _PRETEXTOS: list[tuple[tuple[str, ...], str]] = [
     (
         ("SOFTWARE", "PROCESO_ALTO"),
@@ -1282,7 +1184,6 @@ _TERM_PROCESO = {"migracion", "auditoria", "facturacion", "licitacion",
 
 
 def _primer_termino(categorias: dict[str, list[str]], objetivo: str) -> str:
-    """Primer termino de la categoria indicada (para redactar el pretexto)."""
     for t in categorias.get(objetivo, []):
         return t
     return ""
@@ -1292,10 +1193,15 @@ def generar_pretexto_viable(hallazgo: "Hallazgo",
                             categorias: dict[str, list[str]],
                             stack_verificado: set[str] | None = None) -> str:
     """Genera el 'pretexto viable para el atacante' cruzando categorias y stack verificado."""
+    if hallazgo.secretos:
+        return (
+            f"Explotar directamente o invocar la filtracion de {', '.join(hallazgo.secretos)} "
+            f"simulando una alerta critica del equipo de DevSecOps para forzar la rotacion "
+            f"o captura de credenciales."
+        )
     cats = set(categorias)
     actores = [a.split(" (")[0] for a in (hallazgo.actores or [])]
     actor = actores[0] if actores else "un responsable interno"
-
     rol = _primer_termino(categorias, "ROL_ALTO")
     proceso = next((t for t in categorias.get("PROCESO_ALTO", []) if t in _TERM_PROCESO), "")
     software = _primer_termino(categorias, "SOFTWARE")
@@ -1306,7 +1212,6 @@ def generar_pretexto_viable(hallazgo: "Hallazgo",
     match = re.search(r"Documento publico: ([^.\n]+)", hallazgo.oracion)
     if match:
         documento = match.group(1).strip()
-
     match_autor = re.search(
         r"Autor declarado en metadatos:\s*([^.\n]+)", hallazgo.oracion)
     if match_autor:
@@ -1327,17 +1232,26 @@ def generar_pretexto_viable(hallazgo: "Hallazgo",
     return ("Contactar a " + actor +
             " mencionando el contexto publicado para ganar credibilidad inicial.")
 
-def generar_diagnostico(categorias: Iterable[str], actores: list[str]) -> tuple[str, str]:
-    """Diagnostico y mitigacion heuristicos segun las categorias detectadas."""
+
+def generar_diagnostico(categorias: Iterable[str],
+                        actores: list[str],
+                        secretos: list[str] | None = None) -> tuple[str, str]:
+    """Diagnostico y mitigacion heuristicos segun las categorias o secretos detectados."""
+    if secretos:
+        return (
+            f"Acceso directo o suplantacion critica mediante credenciales/secretos "
+            f"filtrados publicamente ({', '.join(secretos)}).",
+            "Revocar y rotar de inmediato la credencial expuesta; eliminarla del "
+            "repositorio e historial de commits; activar secret scanning en CI/CD "
+            "y almacenar secretos en un Vault o variables de entorno.",
+        )
     cats = set(categorias)
     actores_str = ", ".join(actores) if actores else "personal interno"
-
     for requiere, riesgo, mitigacion in _DIAGNOSTICOS:
         if cats.issuperset(requiere):
             if requiere == ("ROL_ALTO", "PROCESO_ALTO"):
                 riesgo = riesgo.replace("(util para", f"({actores_str}, util para")
             return riesgo, mitigacion
-
     return (
         "Informacion contextual de operaciones que puede usarse para ganar "
         "empatia o credibilidad inicial en un pretexto.",
@@ -1346,26 +1260,13 @@ def generar_diagnostico(categorias: Iterable[str], actores: list[str]) -> tuple[
 
 
 # ---------------------------------------------------------------------------
-# 8. ANALISIS DEL CORPUS
+# 8. ANALISIS DEL CORPUS Y RECALCULO INTERACTIVO
 # ---------------------------------------------------------------------------
 
-
 def _fragmentos(texto: str, sentences) -> list[str]:
-    """
-    Divide en fragmentos analizables.
-
-    Los saltos de linea del texto ORIGINAL tienen prioridad: los conectores
-    usan lineas para separar registros independientes (p.ej. un TXT de DNS por
-    linea). Si se agruparan en un solo bloque, la deteccion de enumeracion
-    tecnica no podria decidir que el fragmento es una lista de recursos y no
-    un relato social.
-
-    Si el texto no tiene lineas, se recurre a las oraciones del NLP.
-    """
     lineas = [l.strip() for l in (texto or "").splitlines() if l.strip()]
     if len(lineas) > 1:
         return lineas
-
     partes = []
     for sent in sentences:
         t = sent.text.strip()
@@ -1379,7 +1280,6 @@ def _fragmentos(texto: str, sentences) -> list[str]:
 
 
 def _contexto_tecnico_texto(texto: str) -> bool:
-    """True si el fragmento tiene marcadores de exposicion tecnica."""
     norm = normalizar(texto)
     if _PATH_RE.search(texto or ""):
         return True
@@ -1394,26 +1294,13 @@ def _contexto_tecnico_texto(texto: str) -> bool:
 
 
 def _actores_de_fragmento(doc_nlp, frag: str) -> list[str]:
-    """
-    Entidades NER presentes en la oracion que contiene el fragmento.
-
-    Si el fragmento cubre MULTIPLES oraciones (p.ej. cuando el texto fue
-    reagrupado, como en los metadatos de PDF), se toman las entidades de
-    todas las oraciones implicadas: el actor real puede estar en cualquiera
-    de ellas ("... con la consultora TechSolutions" esta en la 3ra oracion,
-    no en la 1ra, que solo contiene el nombre del documento).
-    """
     actores: list[str] = []
-
-    # 1) Oraciones totalmente contenidas en el fragmento.
     frag_norm = normalizar(frag)
     detalles: list[tuple[int, str]] = []
     for sent in doc_nlp.sents:
         sent_norm = normalizar(sent.text)
         if not sent_norm:
             continue
-        # La oracion esta dentro del fragmento (o al revés, p.ej. el
-        # fragmento se reagrupo y la oracion es mas corta).
         if sent_norm in frag_norm or frag_norm in sent_norm:
             for e in sent.ents:
                 if e.label_ in ETIQUETAS_ACTOR:
@@ -1422,7 +1309,6 @@ def _actores_de_fragmento(doc_nlp, frag: str) -> list[str]:
         detalles.sort(key=lambda x: x[0])
         return [d for _, d in detalles]
 
-    # 2) Respaldo: la oracion con mayor solapamiento con el fragmento.
     mejor, mejor_puntuacion = None, 0.0
     tokens_frag = set(frag_norm.split())
     for sent in doc_nlp.sents:
@@ -1442,21 +1328,72 @@ def _actores_de_fragmento(doc_nlp, frag: str) -> list[str]:
     return actores
 
 
+def recalcular_resultado_filtrado(resultado_base: ResultadoAnalisis,
+                                  indices_conservados: set[int]) -> ResultadoAnalisis:
+    """
+    Recalcula el PVI, las distribuciones por fuente/categoria y la cobertura
+    del Kit de 5 Piezas usando unicamente los hallazgos marcados por el analista
+    (funcionalidad interactiva de Social Eye integrada con la formula exponencial).
+    """
+    conservados = [
+        h for i, h in enumerate(resultado_base.hallazgos)
+        if i in indices_conservados
+    ]
+    nuevo = ResultadoAnalisis(
+        cobertura=resultado_base.cobertura,
+        confianza=resultado_base.confianza,
+        descartes=list(resultado_base.descartes),
+        fuentes_ok=list(resultado_base.fuentes_ok),
+        fuentes_fallidas=list(resultado_base.fuentes_fallidas),
+        stack_verificado=list(resultado_base.stack_verificado),
+        reconocimiento_tecnico=list(resultado_base.reconocimiento_tecnico),
+        aportes_tecnicos=dict(resultado_base.aportes_tecnicos),
+        hallazgos=conservados,
+    )
+    if not conservados:
+        return nuevo
+
+    pvi_bruto = 0.0
+    por_fuente: dict[str, float] = {}
+    por_categoria: dict[str, float] = {}
+    piezas_vistas: set[str] = set()
+
+    for h in conservados:
+        pvi_bruto += h.impacto
+        por_fuente[h.fuente] = round(por_fuente.get(h.fuente, 0.0) + h.impacto, 2)
+        for c in h.categorias:
+            por_categoria[c] = round(
+                por_categoria.get(c, 0.0) + h.riesgo_intrinseco * MULTIPLICADORES.get(c, 0.3),
+                2,
+            )
+        piezas_vistas.update(h.piezas_kit)
+
+    for f_tec, pts_tec in resultado_base.aportes_tecnicos.items():
+        pvi_bruto += pts_tec
+        por_fuente[f_tec] = round(por_fuente.get(f_tec, 0.0) + pts_tec, 2)
+    if "CRITICO" not in por_categoria and resultado_base.aportes_tecnicos:
+        por_categoria["ANCLAJE_TECNICO"] = round(sum(resultado_base.aportes_tecnicos.values()), 2)
+
+    pvi = 100.0 * (1.0 - math.exp(-pvi_bruto / K_SATURACION))
+    nuevo.pvi = round(min(100.0, pvi), 1)
+    nuevo.pvi_bruto = round(pvi_bruto, 2)
+    nuevo.por_fuente = dict(sorted(por_fuente.items(), key=lambda kv: -kv[1]))
+    nuevo.por_categoria = dict(sorted(por_categoria.items(), key=lambda kv: -kv[1]))
+    nuevo.piezas_cubiertas = [p for p in PIEZAS_KIT if p in piezas_vistas]
+    return nuevo
+
+
 def analizar_corpus(items: list[dict[str, Any]], empresa: str, dominio: str,
                     umbral_similitud: float = 0.68,
-                    estado_conectores: list[dict[str, str]] | None = None) -> ResultadoAnalisis:
+                    estado_conectores: list[dict[str, str]] | None = None,
+                    enmascarar: bool = False) -> ResultadoAnalisis:
     """
-    Analiza el corpus recolectado y devuelve el PVI con cobertura y confianza.
-
-    Cada item: {"fuente": str, "texto": str, "url": str, "confianza": float}
+    Analiza el corpus recolectado y devuelve el PVI con cobertura, confianza,
+    deteccion de secretos y cobertura del Kit de Pretexto (5 piezas).
     """
     nlp = obtener_nlp()
     resultado = ResultadoAnalisis()
 
-    # --- Dedup de documentos: no contar dos veces el mismo texto ---
-    # NOTA: la relevancia se evalua sobre el texto ORIGINAL (antes de limpiar),
-    # porque la limpieza elimina las URLs, que son justamente la evidencia de
-    # que el documento pertenece al dominio auditado.
     documentos: list[dict[str, Any]] = []
     claves_vistas: set[str] = set()
     for item in items:
@@ -1477,7 +1414,6 @@ def analizar_corpus(items: list[dict[str, Any]], empresa: str, dominio: str,
     stack_verificado = extraer_stack_tecnico_verificado(documentos)
     resultado.stack_verificado = sorted(stack_verificado)
 
-    # Conserva la exposicion tecnica (Subdominios, DNS, Robots, Wayback) para mostrarla en la UI
     for d in documentos:
         if d.get("fuente") in {
             "Subdominios (Certificados)",
@@ -1491,9 +1427,7 @@ def analizar_corpus(items: list[dict[str, Any]], empresa: str, dominio: str,
                 "url": d.get("url", ""),
             })
 
-    # --- Deteccion de senales por documento ---
     hallazgos_brutos: list[Hallazgo] = []
-
     for doc in documentos:
         fuente = doc.get("fuente", "Desconocida")
         url = doc.get("url", "")
@@ -1510,30 +1444,15 @@ def analizar_corpus(items: list[dict[str, Any]], empresa: str, dominio: str,
 
         doc_nlp = nlp(texto)
         fragmentos = _fragmentos(texto, doc_nlp.sents)
-
-        # En resultados cortos de Dorking (snippets de LinkedIn), mantener el snippet unido
-        # preserva el Nombre del empleado (en el titulo) junto a su Rol/Stack (en el cuerpo).
         if fuente == "OSINT Redes / Dorking" and len(texto) < 600:
             fragmentos = [" ".join(fragmentos)] if fragmentos else []
 
-        # --- Falsa coincidencia tautologica ---
-        # Si el nombre de la empresa auditada esta en la taxonomia (p.ej.
-        # "Salesforce" es un software en la lista), cualquier pagina que la
-        # mencione matchearia consigo misma. El termino que ES la empresa
-        # auditada no aporta informacion: se excluye de la deteccion.
         tokens_empresa = set(tokens_identificadores(empresa))
-        # Tambien el nombre del producto de la propia empresa.
         tokens_empresa |= {t for t in tokens_empresa if len(t) > 3}
 
-        # --- Metadatos de documento: el documento es UNA unidad ---
-        # El nombre del archivo y el autor pertenecen al mismo hallazgo:
-        # "Formulario_Proveedores.pdf de mgarcia" es un solo vector de
-        # phishing dirigido, no dos hallazgos independientes.
         if fuente == "Metadatos PDF":
             texto_agrupado = " ".join(fragmentos)
             fragmentos = [texto_agrupado] if texto_agrupado.strip() else []
-            # El autor debe identificar a una persona real: "Microsoft Office
-            # User" o "Unknown" no son una diana de phishing dirigido.
             m_autor = re.search(
                 r"Autor declarado en metadatos:\s*([^.\n]+)", texto_agrupado)
             if m_autor and autor_es_generico(m_autor.group(1).strip()):
@@ -1544,67 +1463,52 @@ def analizar_corpus(items: list[dict[str, Any]], empresa: str, dominio: str,
                 continue
 
         for frag in fragmentos:
+            # Deteccion de secretos sobre el fragmento original antes de quitar URLs
+            secretos_frag = detectar_secretos(frag)
             frag_limpia = limpiar_texto_analizable(frag)
-            if len(frag_limpia) < 15:
+            if len(frag_limpia) < 15 and not secretos_frag:
                 continue
 
-            # --- Filtro 1: ruido de marcas/boilerplate sin valor de riesgo ---
-            if es_ruido_generico(frag_limpia):
+            if not secretos_frag and es_ruido_generico(frag_limpia):
                 resultado.descartes.append({
                     "fuente": fuente, "url": url,
                     "motivo": "ruido generico (marcas sin contexto social)",
                 })
                 continue
 
-            # --- Filtro 1b: codigo fuente pegado (pastebin, snippets) ---
-            # "define('USE_USERNAME', true)" contiene 'password' como nombre
-            # de variable: no revela nada sobre la organizacion auditada.
-            if es_codigo_fuente(frag_limpia):
+            if not secretos_frag and es_codigo_fuente(frag_limpia):
                 resultado.descartes.append({
                     "fuente": fuente, "url": url,
                     "motivo": "codigo fuente sin contexto social",
                 })
                 continue
 
-            # --- Filtro 1c: etiqueta de navegacion sin contenido ---
-            # "Login | Salesforce", "See Troubleshoot Login Issues".
-            if es_fragmento_esquematico(frag_limpia):
+            if not secretos_frag and es_fragmento_esquematico(frag_limpia):
                 resultado.descartes.append({
                     "fuente": fuente, "url": url,
                     "motivo": "etiqueta de navegacion sin contexto social",
                 })
                 continue
 
-            ctx = _contexto_tecnico_texto(frag_limpia)
+            ctx = _contexto_tecnico_texto(frag_limpia) or bool(secretos_frag)
             categorias = detectar_categorias(
                 frag_limpia, ctx, excluir=tokens_empresa, doc_nlp=doc_nlp, dominio=dominio
             )
+            if secretos_frag:
+                categorias.setdefault("CRITICO", []).extend(secretos_frag)
+                categorias["CRITICO"] = sorted(set(categorias["CRITICO"]))
+
             if not categorias:
                 continue
 
-            ctx = _contexto_tecnico_texto(frag_limpia)
-            categorias = detectar_categorias(
-                frag_limpia, ctx, excluir=tokens_empresa, doc_nlp=doc_nlp
-            )
-            if not categorias:
-                continue
-
-            # --- Filtro 2: enumeracion tecnica (no habilita pretexting) ---
-            # "admin.example.com, vpn.example.com" o "TXT: x | MX: y" es
-            # reconocimiento tecnico: permite enumerar objetivos, pero NO
-            # inventar una mentira sobre personas o procesos. Se descarta
-            # aunque contenga palabras que matcheen categorias sociales
-            # (p.ej. un CNAME llamado "proveedor.ejemplo.com").
-            if es_enumeracion_tecnica_pura(frag_limpia):
+            if not secretos_frag and es_enumeracion_tecnica_pura(frag_limpia):
                 resultado.descartes.append({
                     "fuente": fuente, "url": url,
                     "motivo": "enumeracion tecnica sin contexto social",
                 })
                 continue
 
-            # --- Filtro 3: el hallazgo debe permitir construir un pretexto ---
-            # Sin senal social el fragmento no habilita ningun pretexto creible.
-            if not tiene_senal_social(categorias):
+            if not secretos_frag and not tiene_senal_social(categorias):
                 resultado.descartes.append({
                     "fuente": fuente, "url": url,
                     "motivo": "sin senal social habilitante para pretexting",
@@ -1617,9 +1521,6 @@ def analizar_corpus(items: list[dict[str, Any]], empresa: str, dominio: str,
                 and normalizar(a.split(" (")[0]) not in tokens_empresa
                 and normalizar(a.split(" (")[0]) != normalizar(empresa)
             ]
-            # El nombre del documento ("Formulario Proveedores") es una etiqueta,
-            # no un actor: no debe desplazar al actor real (el proveedor, el
-            # responsable) en el bonus ni en el pretexto generado.
             if fuente == "Metadatos PDF":
                 actores = [a for a in actores
                            if not _coincide_con_nombre_documento(a, frag_limpia)]
@@ -1629,38 +1530,46 @@ def analizar_corpus(items: list[dict[str, Any]], empresa: str, dominio: str,
 
             terminos = sorted({t for ts in categorias.values() for t in ts})
             riesgo = calcular_riesgo_intrinseco(
-                categorias, ctx, bool(actores), identificadores, texto=frag_limpia
+                categorias, ctx, bool(actores), identificadores,
+                texto=frag_limpia, tiene_secreto=bool(secretos_frag),
             )
             if riesgo <= 0:
                 continue
 
-            riesgo_desc, mitigacion = generar_diagnostico(
-                categorias.keys(), sorted(set(actores))
-            )
+            actores_unicos = sorted(set(actores))
+            if enmascarar:
+                actores_unicos = [enmascarar_actor(a) for a in actores_unicos]
+                oracion_final = enmascarar_texto_sensible(frag_limpia)
+            else:
+                oracion_final = frag_limpia
 
+            riesgo_desc, mitigacion = generar_diagnostico(
+                categorias.keys(), actores_unicos, secretos=secretos_frag
+            )
+            piezas_hallazgo = mapear_piezas_kit(
+                categorias.keys(), terminos, actores_unicos, secretos_frag,
+                texto_norm=normalizar(frag_limpia),
+            )
             hallazgo = Hallazgo(
                 fuente=fuente,
                 url=url,
-                oracion=frag_limpia,
+                oracion=oracion_final,
                 terminos=terminos,
-                actores=sorted(set(actores)),
+                actores=actores_unicos,
                 categorias=sorted(categorias.keys()),
                 riesgo_intrinseco=riesgo,
                 contexto_tecnico=ctx,
                 identificadores=identificadores,
                 riesgo_desc=riesgo_desc,
                 mitigacion=mitigacion,
+                secretos=secretos_frag,
+                piezas_kit=piezas_hallazgo,
             )
-            # Pretexto viable: la accion concreta que el atacante ejecutaria.
             hallazgo.pretexto = generar_pretexto_viable(
                 hallazgo, categorias, stack_verificado=stack_verificado
             )
             hallazgos_brutos.append(hallazgo)
 
-    # --- Dedup de hallazgos por SIMILITUD TEMATICA ---
-    # Se usa similitud_tematica (stopwords + containment) en lugar de Jaccard
-    # puro: la misma publicacion recuperada de LinkedIn y de la nota de prensa
-    # se reporta como un solo hallazgo, no como dos.
     grupos: list[list[Hallazgo]] = []
     for h in hallazgos_brutos:
         encontrado = None
@@ -1679,15 +1588,13 @@ def analizar_corpus(items: list[dict[str, Any]], empresa: str, dominio: str,
         else:
             encontrado.append(h)
 
-    # --- Ponderacion final: riesgo intrinseco x peso fuente x confianza ---
     hallazgos_finales: list[Hallazgo] = []
     pvi_bruto = 0.0
     por_fuente: dict[str, float] = {}
     por_categoria: dict[str, float] = {}
     conteo_por_fuente: dict[str, int] = {}
+    piezas_globales: set[str] = set()
 
-    # Ordena de mayor a menor riesgo intrinseco para que los hallazgos mas graves
-    # de cada fuente reciban el 100% del peso antes de amortiguar los siguientes.
     grupos.sort(key=lambda g: max(h.riesgo_intrinseco for h in g), reverse=True)
 
     for grupo in grupos:
@@ -1699,9 +1606,6 @@ def analizar_corpus(items: list[dict[str, Any]], empresa: str, dominio: str,
         peso = cfg_fuente["peso"]
         confianza = cfg_fuente["confianza"]
 
-        # Decaimiento geometrico por fuente repetida (100%, 55%, 30%, 16%...):
-        # Evita que 25 hallazgos de una misma fuente en vivo disparen el PVI a >95,
-        # sin castigar a la Demo (que tiene 1 o 2 hallazgos por fuente).
         n_previos = conteo_por_fuente.get(principal.fuente, 0)
         conteo_por_fuente[principal.fuente] = n_previos + 1
         amortiguacion_fuente = 0.55 ** n_previos
@@ -1714,17 +1618,14 @@ def analizar_corpus(items: list[dict[str, Any]], empresa: str, dominio: str,
             * factor_conf
             * amortiguacion_fuente
         )
-
-        # Tope maximo por fuente individual (14 pts brutos max por fuente):
-        # Obliga a que un PVI > 75 requiera exposicion en MULTIPLES fuentes distintas.
         acumulado_fuente = por_fuente.get(principal.fuente, 0.0)
         if acumulado_fuente + impacto > 14.0:
             impacto = max(0.25, 14.0 - acumulado_fuente)
 
         principal.impacto = round(impacto, 2)
         principal.severidad = clasificar_severidad(principal.riesgo_intrinseco)
-
         pvi_bruto += principal.impacto
+
         por_fuente[principal.fuente] = round(
             por_fuente.get(principal.fuente, 0.0) + principal.impacto, 2
         )
@@ -1734,22 +1635,20 @@ def analizar_corpus(items: list[dict[str, Any]], empresa: str, dominio: str,
                 + principal.riesgo_intrinseco * MULTIPLICADORES.get(c, 0.3),
                 2,
             )
+        piezas_globales.update(principal.piezas_kit)
         hallazgos_finales.append(principal)
 
-    # --- Integracion del Anclaje Tecnico (Superficie de Credibilidad) ---
-    # La infraestructura expuesta (Subdominios sensibles, Robots, Wayback, DNS)
-    # no habilita un pretexto por si sola si no hay contexto social, pero cuando
-    # SI existen hallazgos sociales, actua como multiplicador de credibilidad
-    # ("Insider Jargon") y aporta de forma acotada al PVI y al desglose por fuente.
     if hallazgos_finales:
         aportes_tec = calcular_anclaje_tecnico(documentos)
+        resultado.aportes_tecnicos = dict(aportes_tec)
         for f_tec, pts_tec in aportes_tec.items():
             pvi_bruto += pts_tec
             por_fuente[f_tec] = round(por_fuente.get(f_tec, 0.0) + pts_tec, 2)
         if "CRITICO" not in por_categoria and aportes_tec:
             por_categoria["ANCLAJE_TECNICO"] = round(sum(aportes_tec.values()), 2)
+        if aportes_tec:
+            piezas_globales.add("jerga")
 
-    # --- Saturacion: ampliar resultados NO debe hacer explotar el indice ---
     pvi = 100.0 * (1.0 - math.exp(-pvi_bruto / K_SATURACION))
     resultado.pvi = round(min(100.0, pvi), 1)
     resultado.pvi_bruto = round(pvi_bruto, 2)
@@ -1758,8 +1657,8 @@ def analizar_corpus(items: list[dict[str, Any]], empresa: str, dominio: str,
     )
     resultado.por_fuente = dict(sorted(por_fuente.items(), key=lambda kv: -kv[1]))
     resultado.por_categoria = dict(sorted(por_categoria.items(), key=lambda kv: -kv[1]))
+    resultado.piezas_cubiertas = [p for p in PIEZAS_KIT if p in piezas_globales]
 
-    # --- Cobertura y confianza ---
     fuentes_esperadas = set(PESOS_FUENTE.keys())
     fuentes_vistas = {d.get("fuente") for d in documentos}
     resultado.fuentes_ok = sorted(fuentes_vistas & fuentes_esperadas)
@@ -1779,7 +1678,6 @@ def analizar_corpus(items: list[dict[str, Any]], empresa: str, dominio: str,
             min(1.0, len(resultado.fuentes_ok) / max(1, len(fuentes_esperadas))), 3
         )
 
-    # Menos hallazgos unicos => menos confianza en la estimacion.
     densidad = min(1.0, len(resultado.hallazgos) / 8.0)
     nivel = 0.6 * resultado.cobertura + 0.4 * densidad
     if nivel >= 0.66:
