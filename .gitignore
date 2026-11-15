@@ -1,0 +1,54 @@
+# Entornos virtuales
+.venv/
+venv/
+env/
+ENV/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Herramientas de empaquetado
+.Python
+build/
+dist/
+*.egg-info/
+pip-wheel-metadata/
+*.egg
+
+# Tests y cobertura
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# Streamlit
+.streamlit/secrets.toml
+.streamlit/cache/
+
+# Variables de entorno y secretos locales
+.env
+.env.*
+!.env.example
+
+# IDE y sistema operativo
+.vscode/
+.idea/
+*.code-workspace
+.DS_Store
+Thumbs.db
+
+# Logs y archivos temporales
+*.log
+*.tmp
+*.temp
+
+# Datos generados localmente
+data/
+reports/
+*.sqlite
+*.db
