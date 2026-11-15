@@ -1152,9 +1152,9 @@ def calcular_riesgo_intrinseco(categorias: dict[str, list[str]],
 def clasificar_severidad(riesgo: float) -> str:
     """Severidad en base al riesgo intrinseco (no al impacto ponderado)."""
     if riesgo >= 0.75:
-        return "BUENA"
+        return "ALTO"
     if riesgo >= 0.45:
-        return "MEDIA"
+        return "MEDIO"
     return "BAJO"
 
 
