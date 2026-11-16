@@ -773,6 +773,13 @@ with st.sidebar:
     )
     st.divider()
     ejecutar = st.button("Ejecutar Evaluación PVI", type="primary", width="stretch")
+    nueva_busqueda = st.button("Nueva Búsqueda", width="stretch")
+
+if nueva_busqueda:
+    import streamlit.components.v1 as components
+    st.session_state.clear()
+    components.html("<script>window.parent.location.reload();</script>", height=0)
+    st.stop()
 
 if ejecutar:
     if "en Vivo" in modo and not autorizacion_input:
