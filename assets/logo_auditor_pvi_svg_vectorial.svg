@@ -1,0 +1,91 @@
+<svg width="880" height="220" viewBox="0 0 880 220" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <!-- Fondo oscuro alineado a la paleta Slate / Cyber de app.py -->
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0f172a"/>
+      <stop offset="60%" stop-color="#1e293b"/>
+      <stop offset="100%" stop-color="#0b1324"/>
+    </linearGradient>
+
+    <!-- Acento Cian/Azul del Hero Banner (#38bdf8 -> #0284c7) -->
+    <linearGradient id="cyanGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8"/>
+      <stop offset="100%" stop-color="#0284c7"/>
+    </linearGradient>
+
+    <!-- Acento Violeta/Indigo de las barras de dimensiones (#818cf8 -> #6366f1) -->
+    <linearGradient id="indigoGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#818cf8"/>
+      <stop offset="100%" stop-color="#6366f1"/>
+    </linearGradient>
+
+    <!-- Acento Verde Esmeralda Blue Team (#10b981) -->
+    <linearGradient id="emeraldGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#38bdf8"/>
+      <stop offset="55%" stop-color="#818cf8"/>
+      <stop offset="100%" stop-color="#10b981"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Contenedor principal -->
+  <rect x="2" y="2" width="876" height="216" rx="22" fill="url(#bgGrad)" stroke="#38bdf8" stroke-opacity="0.28" stroke-width="2"/>
+
+  <!-- Emblema izquierdo: Escudo Blue Team + Nodo de Inteligencia OSINT -->
+  <g transform="translate(54, 34)">
+    <!-- Halo exterior sutil -->
+    <circle cx="76" cy="76" r="72" fill="none" stroke="#38bdf8" stroke-opacity="0.14" stroke-width="1.5" stroke-dasharray="6 6"/>
+
+    <!-- Silueta de Escudo Defensivo -->
+    <path d="M76 14 L132 36 L132 80 C132 115 107 137 76 148 C45 137 20 115 20 80 L20 36 Z"
+          fill="#0f172a" stroke="url(#cyanGrad)" stroke-width="4.5" stroke-linejoin="round"/>
+
+    <!-- Contorno interior del escudo -->
+    <path d="M76 24 L122 42 L122 79 C122 108 101 127 76 137 C51 127 30 108 30 79 L30 42 Z"
+          fill="none" stroke="url(#indigoGrad)" stroke-opacity="0.55" stroke-width="1.8" stroke-linejoin="round"/>
+
+    <!-- Red de correlacion OSINT (5 nodos = 5 dimensiones del Kit de Pretexto) -->
+    <g stroke="#38bdf8" stroke-width="2" stroke-opacity="0.75">
+      <line x1="76" y1="80" x2="76" y2="48"/>
+      <line x1="76" y1="80" x2="105" y2="68"/>
+      <line x1="76" y1="80" x2="96" y2="106"/>
+      <line x1="76" y1="80" x2="56" y2="106"/>
+      <line x1="76" y1="80" x2="47" y2="68"/>
+    </g>
+
+    <!-- Nodos perifericos -->
+    <circle cx="76" cy="48" r="4.5" fill="#38bdf8"/>
+    <circle cx="105" cy="68" r="4.5" fill="#818cf8"/>
+    <circle cx="96" cy="106" r="4.5" fill="#10b981"/>
+    <circle cx="56" cy="106" r="4.5" fill="#818cf8"/>
+    <circle cx="47" cy="68" r="4.5" fill="#38bdf8"/>
+
+    <!-- Nucleo central -->
+    <circle cx="76" cy="80" r="11" fill="#1e293b" stroke="url(#cyanGrad)" stroke-width="3.5"/>
+    <circle cx="76" cy="80" r="4" fill="#f8fafc"/>
+  </g>
+
+  <!-- Separador vertical -->
+  <line x1="234" y1="48" x2="234" y2="172" stroke="#94a3b8" stroke-opacity="0.22" stroke-width="1.5"/>
+
+  <!-- Bloque Tipografico en Español -->
+  <g transform="translate(264, 0)">
+    <!-- Etiqueta superior estilo soc-kicker -->
+    <rect x="0" y="42" width="236" height="24" rx="12" fill="#38bdf8" fill-opacity="0.14" stroke="#38bdf8" stroke-opacity="0.4" stroke-width="1"/>
+    <text x="118" y="58" text-anchor="middle" font-family="'Segoe UI', Inter, Arial, sans-serif" font-size="11" font-weight="700" letter-spacing="1.6" fill="#38bdf8">
+      DEFENSIVE OSINT ENGINE
+    </text>
+
+    <!-- Titulo Principal -->
+    <text x="0" y="118" font-family="'Segoe UI', Inter, Arial, sans-serif" font-size="54" font-weight="800" letter-spacing="-0.5" fill="#f8fafc">
+      AUDITOR <tspan fill="url(#cyanGrad)">PVI</tspan>
+    </text>
+
+    <!-- Subtitulo en Español -->
+    <text x="2" y="150" font-family="'Segoe UI', Inter, Arial, sans-serif" font-size="18.5" font-weight="500" letter-spacing="0.4" fill="#cbd5e1">
+      Análisis de Exposición OSINT e Ingeniería Social
+    </text>
+
+    <!-- Barra inferior decorativa con el gradiente exacto de la UI -->
+    <rect x="2" y="168" width="440" height="4" rx="2" fill="url(#emeraldGrad)"/>
+  </g>
+</svg>
